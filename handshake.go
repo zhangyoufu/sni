@@ -25,6 +25,7 @@ func ReadHostname(r io.Reader) (hostname string, rcvd io.ReadCloser, err error) 
 		svrNameListLen  uint16
 		nameType        uint8
 		hostNameLen     uint16
+		hostName        []byte
 	)
 
 	// error handling by returning is too verbose
@@ -45,12 +46,16 @@ func ReadHostname(r io.Reader) (hostname string, rcvd io.ReadCloser, err error) 
 
 	// struct Handshake
 
-	msgType = readUint8(rr)
+	if msgType, err = readUint8(rr); err != nil {
+		return
+	}
 	if msgType != client_hello {
 		goto invalid
 	}
 
-	msgLen = readUint24(rr)
+	if msgLen, err = readUint24(rr); err != nil {
+		return
+	}
 	if msgLen > client_hello_max_length {
 		goto invalid
 	}
@@ -59,33 +64,49 @@ func ReadHostname(r io.Reader) (hostname string, rcvd io.ReadCloser, err error) 
 	// struct ClientHello
 
 	// ProtocolVersion, Random
-	rr.Skip(2 + 32)
+	if err = rr.Skip(2 + 32); err != nil {
+		return
+	}
 
-	sessIdLen = readUint8(rr)
+	if sessIdLen, err = readUint8(rr); err != nil {
+		return
+	}
 	if sessIdLen > 32 {
 		goto invalid
 	}
 	if sessIdLen > 0 {
-		rr.Skip(int(sessIdLen))
+		if err = rr.Skip(int(sessIdLen)); err != nil {
+			return
+		}
 	}
 
-	cipherSuitesLen = readUint16(rr)
+	if cipherSuitesLen, err = readUint16(rr); err != nil {
+		return
+	}
 	if strict {
 		if cipherSuitesLen < 2 || cipherSuitesLen > 65534 {
 			goto invalid
 		}
 	}
-	rr.Skip(int(cipherSuitesLen))
+	if err = rr.Skip(int(cipherSuitesLen)); err != nil {
+		return
+	}
 
-	compMethodsLen = readUint8(rr)
+	if compMethodsLen, err = readUint8(rr); err != nil {
+		return
+	}
 	if strict {
 		if compMethodsLen < 1 {
 			goto invalid
 		}
 	}
-	rr.Skip(int(compMethodsLen))
+	if err = rr.Skip(int(compMethodsLen)); err != nil {
+		return
+	}
 
-	extsLen = readUint16(rr)
+	if extsLen, err = readUint16(rr); err != nil {
+		return
+	}
 	if strict {
 		_ = extsLen
 		// FIXME: rr.Limit(int(extsLen))
@@ -94,8 +115,12 @@ func ReadHostname(r io.Reader) (hostname string, rcvd io.ReadCloser, err error) 
 	// iterate through TLS extensions to find SNI extension
 	// duplicate extensions are not checked here
 	for {
-		extType = readUint16(rr)
-		extLen = readUint16(rr)
+		if extType, err = readUint16(rr); err != nil {
+			return
+		}
+		if extLen, err = readUint16(rr); err != nil {
+			return
+		}
 
 		if extType == server_name {
 			if strict {
@@ -103,11 +128,15 @@ func ReadHostname(r io.Reader) (hostname string, rcvd io.ReadCloser, err error) 
 			}
 			break
 		}
-		rr.Skip(int(extLen))
+		if err = rr.Skip(int(extLen)); err != nil {
+			return
+		}
 	}
 
 	// struct ServerNameList
-	svrNameListLen = readUint16(rr)
+	if svrNameListLen, err = readUint16(rr); err != nil {
+		return
+	}
 	if strict {
 		_ = svrNameListLen
 		// FIXME: rr.Limit(int(svrNameListLen))
@@ -115,14 +144,21 @@ func ReadHostname(r io.Reader) (hostname string, rcvd io.ReadCloser, err error) 
 
 	// The definition of SNI-related structures is buggy. There is no way to
 	// skip a ServerName structure whose name_type is not host_name(0).
-	nameType = readUint8(rr)
-	hostNameLen = readUint16(rr)
+	if nameType, err = readUint8(rr); err != nil {
+		return
+	}
+	if hostNameLen, err = readUint16(rr); err != nil {
+		return
+	}
 	if nameType != host_name {
 		err = errUnsupportedNameType
 		return
 	}
 
-	hostname = string(rr.ReadN(int(hostNameLen)))
+	if hostName, err = rr.ReadN(int(hostNameLen)); err != nil {
+		return
+	}
+	hostname = string(hostName)
 	rcvd = b.Close()
 	return
 

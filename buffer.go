@@ -79,9 +79,9 @@ func (b *buffer) Close() io.ReadCloser {
 	return newBufferReader(b.buf)
 }
 
-func (b *buffer) Ensure(n int) {
+func (b *buffer) Ensure(n int) (err error) {
 	oldLen := len(b.buf)
-	if n <= oldLen {
+	if n < oldLen {
 		return
 	}
 
@@ -89,7 +89,7 @@ func (b *buffer) Ensure(n int) {
 	if n > cap(b.buf) {
 		oldBuf := b.buf
 		newBuf := make([]byte, cap(oldBuf)*2)
-		copy(newBuf, oldBuf)
+		_ = copy(newBuf, oldBuf)
 		if cap(oldBuf) == defaultBufferSize {
 			bufPool.Put((*defaultBuffer)(unsafe.Pointer(&oldBuf[0])))
 		}
@@ -97,7 +97,8 @@ func (b *buffer) Ensure(n int) {
 
 	read, err := io.ReadAtLeast(b.src, b.buf[len(b.buf):cap(b.buf)], n-oldLen)
 	if err != nil {
-		panic(err)
+		return
 	}
 	b.buf = b.buf[:oldLen+read]
+	return
 }

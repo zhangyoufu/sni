@@ -1,15 +1,9 @@
 package sni
 
-type byteReader interface {
-	ReadByte() byte
-}
-
-type batchReader interface {
-	ReadN(int) []byte
-	Skip(int)
-}
+import "io"
 
 type reader interface {
-	byteReader
-	batchReader
+	io.ByteReader
+	ReadN(int) ([]byte, error)
+	Skip(int) error
 }

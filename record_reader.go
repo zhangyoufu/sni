@@ -18,15 +18,17 @@ func newRecordReader(r reader) *recordReader {
 	return &recordReader{src: r}
 }
 
-func (rr *recordReader) readRecordHeader() error {
+func (rr *recordReader) readRecordHeader() (err error) {
 	var (
-		hdr		[]byte
-		recordType	uint8
-		version		uint16
-		fragLen		uint16
+		hdr        []byte
+		recordType uint8
+		version    uint16
+		fragLen    uint16
 	)
 
-	hdr = rr.src.ReadN(5)
+	if hdr, err = rr.src.ReadN(5); err != nil {
+		return
+	}
 
 	recordType = hdr[0]
 	if recordType != handshake {
@@ -52,74 +54,98 @@ func (rr *recordReader) readRecordHeader() error {
 	}
 
 	rr.remain = int(fragLen)
-	return nil
+	return
 
 invalid:
-	return errInvalidRecord
+	err = errInvalidRecord
+	return
 }
 
-func (rr *recordReader) ReadByte() byte {
+func (rr *recordReader) ReadByte() (data byte, err error) {
 	if rr.remain <= 0 {
-		rr.readRecordHeader()
+		if err = rr.readRecordHeader(); err != nil {
+			return
+		}
 	}
 	return rr.src.ReadByte()
 }
 
-func (rr *recordReader) ReadN(n int) []byte {
-	if n == 0 {
-		return []byte{}
-	}
+func (rr *recordReader) ReadN(n int) (data []byte, err error) {
 	if n < 0 {
-		panic(errInternalError)
+		err = errNegativeRead
+		return
+	}
+
+	if n == 0 {
+		data = []byte{}
+		return
 	}
 
 	if rr.remain <= 0 {
-		rr.readRecordHeader()
+		if err = rr.readRecordHeader(); err != nil {
+			return
+		}
 	}
 
 	if n <= rr.remain {
 		// intra-fragment, return a slice of underlying buffer
 		rr.remain -= n
-		return rr.src.ReadN(n)
+		data, err = rr.src.ReadN(n)
 	} else {
 		// inter-fragment, concatenate byte slices together
+		var chunk []byte
 		buf := make([]byte, n)
 		off := 0
 
 		for {
-			copy(buf[off:], rr.src.ReadN(rr.remain))
+			if chunk, err = rr.src.ReadN(rr.remain); err != nil {
+				return
+			}
+			_ = copy(buf[off:], chunk)
 			off += rr.remain
 			n -= rr.remain
-			rr.readRecordHeader()
+			if err = rr.readRecordHeader(); err != nil {
+				return
+			}
 			if n <= rr.remain {
 				break
 			}
 		}
 
-		copy(buf[off:], rr.src.ReadN(n))
+		if chunk, err = rr.src.ReadN(n); err != nil {
+			return
+		}
+		_ = copy(buf[off:], chunk)
 		rr.remain -= n
-		return buf
+		data = buf
 	}
+	return
 }
 
-func (rr *recordReader) Skip(n int) {
-	if n == 0 {
-		return
-	}
-	if n < 0 {
-		panic(errInternalError)
-	}
+func (rr *recordReader) Skip(n int) (err error) {
+	if n > 0 {
+		if rr.remain <= 0 {
+			if err = rr.readRecordHeader(); err != nil {
+				return
+			}
+		}
 
-	if rr.remain <= 0 {
-		rr.readRecordHeader()
-	}
+		for n > rr.remain {
+			if err = rr.src.Skip(rr.remain); err != nil {
+				return
+			}
+			n -= rr.remain
+			if err = rr.readRecordHeader(); err != nil {
+				return
+			}
+		}
 
-	for n > rr.remain {
-		rr.src.Skip(rr.remain)
-		n -= rr.remain
-		rr.readRecordHeader()
+		if err = rr.src.Skip(n); err != nil {
+			return
+		}
+		rr.remain -= n
+	} else if n < 0 {
+		err = errNegativeRead
 	}
-
-	rr.src.Skip(n)
-	rr.remain -= n
+	return
 }
