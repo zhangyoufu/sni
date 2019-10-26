@@ -1,66 +1,125 @@
 package sni
 
-import "io"
-
 const (
-	ssl_v2      uint16 = 0x0002
-	ssl_v3      uint16 = 0x0300
+	ssl_v2 uint16 = 0x0002
+	ssl_v3 uint16 = 0x0300
 
-	handshake   uint8 = 0x16
+	handshake uint8 = 0x16
 )
 
 type recordReader struct {
-	src    io.Reader
+	src    reader
 	remain int
 }
 
-func newRecordReader(r io.Reader) *recordReader {
+var _ reader = &recordReader{}
+
+func newRecordReader(r reader) *recordReader {
 	return &recordReader{src: r}
 }
 
-func (r *recordReader) Read(p []byte) (n int, err error) {
-	// recharge when nothing remains
-	if r.remain == 0 {
-		var buf [5]byte
-		if _, err = io.ReadFull(r.src, buf[:]); err != nil {
-			panic(errInvalidRecord)
+func (rr *recordReader) readRecordHeader() error {
+	var (
+		hdr		[]byte
+		recordType	uint8
+		version		uint16
+		fragLen		uint16
+	)
+
+	hdr = rr.src.ReadN(5)
+
+	recordType = hdr[0]
+	if recordType != handshake {
+		goto invalid
+	}
+
+	if strict {
+		version = uint16(hdr[1])<<8 | uint16(hdr[2])
+		// SNI is a TLS extension, SSL is prohibited
+		if version == ssl_v2 || version == ssl_v3 {
+			goto invalid
 		}
+	}
 
-		// record type must be handshake
-		if buf[0] != handshake {
-			panic(errInvalidRecord)
-		}
+	fragLen = uint16(hdr[3])<<8 | uint16(hdr[4])
+	// zero-length handshake fragments are prohibited (since TLS 1.2)
+	if fragLen == 0 {
+		goto invalid
+	}
+	// fragment length should not exceed 2^14 (since TLS 1.0)
+	if strict && fragLen > 16384 {
+		goto invalid
+	}
 
-		if strict {
-			ver := uint16(buf[1]) << 8 | uint16(buf[2])
+	rr.remain = int(fragLen)
+	return nil
 
-			// SNI is a TLS extension, SSL is prohibited
-			if ver == ssl_v2 || ver == ssl_v3 {
-				panic(errInvalidRecord)
+invalid:
+	return errInvalidRecord
+}
+
+func (rr *recordReader) ReadByte() byte {
+	if rr.remain <= 0 {
+		rr.readRecordHeader()
+	}
+	return rr.src.ReadByte()
+}
+
+func (rr *recordReader) ReadN(n int) []byte {
+	if n == 0 {
+		return []byte{}
+	}
+	if n < 0 {
+		panic(errInternalError)
+	}
+
+	if rr.remain <= 0 {
+		rr.readRecordHeader()
+	}
+
+	if n <= rr.remain {
+		// intra-fragment, return a slice of underlying buffer
+		rr.remain -= n
+		return rr.src.ReadN(n)
+	} else {
+		// inter-fragment, concatenate byte slices together
+		buf := make([]byte, n)
+		off := 0
+
+		for {
+			copy(buf[off:], rr.src.ReadN(rr.remain))
+			off += rr.remain
+			n -= rr.remain
+			rr.readRecordHeader()
+			if n <= rr.remain {
+				break
 			}
 		}
 
-		// zero-length handshake fragments are prohibited (since TLS 1.2)
-		// fragment length should not exceed 2^14 (since TLS 1.0)
-		fragLen := uint16(buf[3]) << 8 | uint16(buf[4])
-		if fragLen == 0 && fragLen > 16384 {
-			panic(errInvalidRecord)
-		}
+		copy(buf[off:], rr.src.ReadN(n))
+		rr.remain -= n
+		return buf
+	}
+}
 
-		r.remain = int(fragLen)
+func (rr *recordReader) Skip(n int) {
+	if n == 0 {
+		return
+	}
+	if n < 0 {
+		panic(errInternalError)
 	}
 
-	// reduce read size if necessary
-	if len(p) > r.remain {
-		p = p[:r.remain] // this line will panic if r.remain < 0
-		// (e.g. due to cosmic rays or RowHammer)
+	if rr.remain <= 0 {
+		rr.readRecordHeader()
 	}
 
-	// read from underlying reader
-	n, err = r.src.Read(p)
+	for n > rr.remain {
+		rr.src.Skip(rr.remain)
+		n -= rr.remain
+		rr.readRecordHeader()
+	}
 
-	// update number of remaining bytes
-	r.remain -= n
-
-	return
+	rr.src.Skip(n)
+	rr.remain -= n
 }

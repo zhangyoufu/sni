@@ -9,20 +9,15 @@ There is also a strict mode which could be enabled by `strict_sni` build tag.
 # Interface
 
 ```
-func ReadHostname(io.Reader) (hostname string, data []byte, err error)
+func ReadHostname(io.Reader) (hostname string, rcvd io.ReadCloser, err error)
 ```
 
 # Design
 
 ```
-io.Reader -> io.TeeReader (io.Reader) -> recordReader (io.Reader) -> bufio.Reader -> fancyReader -> Handshake & ClientHello
+io.Reader --> buffer --> bufferViewer (reader) --> recordReader (reader) --> Handshake & ClientHello
                    |
-                   v
-             bytes.Buffer
-```
-
-```
-io.Reader --> Buffer ()
+                   +---> bufferReader (io.ReadCloser)
 ```
 
 # Reference

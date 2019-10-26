@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/hex"
+	"io/ioutil"
 	"log"
 	"net"
 
@@ -21,12 +23,18 @@ func main() {
 				log.Print(err)
 				return
 			}
-			hostname, data, err := sni.ReadHostname(conn)
+			hostname, rcvd, err := sni.ReadHostname(conn)
 			if err != nil {
 				log.Print(err)
 				return
 			}
-			log.Printf("%s: %#v", hostname, data)
+			data, err := ioutil.ReadAll(rcvd)
+			_ = rcvd.Close()
+			if err != nil {
+				log.Print(err)
+				return
+			}
+			log.Printf("%s\n%s", hostname, hex.Dump(data))
 		}(conn)
 	}
 }

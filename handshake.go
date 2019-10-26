@@ -1,9 +1,6 @@
 package sni
 
-import (
-	"bytes"
-	"io"
-)
+import "io"
 
 const (
 	// OpenSSL
@@ -15,7 +12,7 @@ const (
 	host_name    uint8  = 0x00
 )
 
-func ReadHostname(r io.Reader) (hostname string, data []byte, err error) {
+func ReadHostname(r io.Reader) (hostname string, rcvd io.ReadCloser, err error) {
 	var (
 		msgType         uint8
 		msgLen          uint32
@@ -40,91 +37,96 @@ func ReadHostname(r io.Reader) (hostname string, data []byte, err error) {
 	}()
 
 	// save a copy of read data
-	var buf bytes.Buffer
-	r = io.TeeReader(r, &buf)
+	b := newBuffer(r)
+	bv := newBufferViewer(b)
 
 	// merge TLS records (fragments)
-	r = newRecordReader(r)
-
-	reader := newFancyReader(r)
+	rr := newRecordReader(bv)
 
 	// struct Handshake
 
-	msgType = reader.ReadUint8()
+	msgType = readUint8(rr)
 	if msgType != client_hello {
-		panic(errInvalidHandshake)
+		goto invalid
 	}
 
-	msgLen = reader.ReadUint24()
+	msgLen = readUint24(rr)
 	if msgLen > client_hello_max_length {
-		panic(errInvalidHandshake)
+		goto invalid
 	}
-	reader.Limit(int(msgLen))
+	// FIXME: rr.Limit(int(msgLen))
 
 	// struct ClientHello
 
 	// ProtocolVersion, Random
-	reader.Skip(2 + 32)
+	rr.Skip(2 + 32)
 
-	sessIdLen = reader.ReadUint8()
+	sessIdLen = readUint8(rr)
 	if sessIdLen > 32 {
-		panic(errInvalidHandshake)
+		goto invalid
 	}
 	if sessIdLen > 0 {
-		reader.Skip(int(sessIdLen))
+		rr.Skip(int(sessIdLen))
 	}
 
-	cipherSuitesLen = reader.ReadUint16()
+	cipherSuitesLen = readUint16(rr)
 	if strict {
 		if cipherSuitesLen < 2 || cipherSuitesLen > 65534 {
-			panic(errInvalidHandshake)
+			goto invalid
 		}
 	}
-	reader.Skip(int(cipherSuitesLen))
+	rr.Skip(int(cipherSuitesLen))
 
-	compMethodsLen = reader.ReadUint8()
+	compMethodsLen = readUint8(rr)
 	if strict {
 		if compMethodsLen < 1 {
-			panic(errInvalidHandshake)
+			goto invalid
 		}
 	}
-	reader.Skip(int(compMethodsLen))
+	rr.Skip(int(compMethodsLen))
 
-	extsLen = reader.ReadUint16()
+	extsLen = readUint16(rr)
 	if strict {
-		reader.Limit(int(extsLen))
+		_ = extsLen
+		// FIXME: rr.Limit(int(extsLen))
 	}
 
 	// iterate through TLS extensions to find SNI extension
 	// duplicate extensions are not checked here
 	for {
-		extType = reader.ReadUint16()
-		extLen = reader.ReadUint16()
+		extType = readUint16(rr)
+		extLen = readUint16(rr)
 
 		if extType == server_name {
 			if strict {
-				reader.Limit(int(extLen))
+				// FIXME: rr.Limit(int(extLen))
 			}
 			break
 		}
-		reader.Skip(int(extLen))
+		rr.Skip(int(extLen))
 	}
 
 	// struct ServerNameList
-	svrNameListLen = reader.ReadUint16()
+	svrNameListLen = readUint16(rr)
 	if strict {
-		reader.Limit(int(svrNameListLen))
+		_ = svrNameListLen
+		// FIXME: rr.Limit(int(svrNameListLen))
 	}
 
 	// The definition of SNI-related structures is buggy. There is no way to
 	// skip a ServerName structure whose name_type is not host_name(0).
-	nameType = reader.ReadUint8()
-	hostNameLen = reader.ReadUint16()
+	nameType = readUint8(rr)
+	hostNameLen = readUint16(rr)
 	if nameType != host_name {
-		panic(errUnsupportedNameType)
+		err = errUnsupportedNameType
+		return
 	}
 
-	hostname = string(reader.Peek(int(hostNameLen)))
-	data = buf.Bytes()
+	hostname = string(rr.ReadN(int(hostNameLen)))
+	rcvd = b.Close()
+	return
+
+invalid:
+	err = errInvalidHandshake
 	return
 }
