@@ -15,9 +15,11 @@ func ReadHostname(io.Reader) (hostname string, rcvd io.ReadCloser, err error)
 # Design
 
 ```
-io.Reader --> buffer --> bufferViewer (reader) --> recordReader (reader) --> Handshake & ClientHello
-                   |
-                   +---> bufferReader (io.ReadCloser)
+(io.Reader) --> buffer --> bufferViewer (reader) --> recordReader (reader) --> Handshake & ClientHello
+                  |
+                  v
+             bufferReader
+            (io.ReadCloser)
 ```
 
 # Reference
