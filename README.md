@@ -4,8 +4,6 @@ This package helps extracting SNI hostname from io.Reader. The data read from io
 
 Clone this repo, `go run github.com/zhangyoufu/sni/cmd/demo`, and access [https://localhost:8443](https://localhost:8443) to see it running.
 
-There is also a strict mode which could be enabled by `strict_sni` build tag.
-
 # Interface
 
 ```

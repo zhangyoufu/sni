@@ -3,129 +3,72 @@ package sni
 import "io"
 
 const (
-	// OpenSSL
-	client_hello_max_length = 131396
-
-	// TLS
-	client_hello uint8  = 0x01
-	server_name  uint16 = 0x0000
-	host_name    uint8  = 0x00
+	client_hello_max_length        = 131396 // OpenSSL
+	server_name             uint16 = 0x0000 // TLS Extension
 )
 
+// Read and parse TLS handshake ClientHello message from the provided io.Reader.
+// SNI hostname will be extracted if available.
 func ReadHostname(r io.Reader) (hostname string, rcvd io.ReadCloser, err error) {
-	var (
-		msgType         uint8
-		msgLen          uint32
-		sessIdLen       uint8
-		cipherSuitesLen uint16
-		compMethodsLen  uint8
-		extsLen         uint16
-		extType         uint16
-		extLen          uint16
-		svrNameListLen  uint16
-		nameType        uint8
-		hostNameLen     uint16
-		hostName        []byte
-	)
-
-	// error handling by returning is too verbose
-	defer func() {
-		if r := recover(); r != nil {
-			if err, _ = r.(error); err == nil {
-				panic(r)
-			}
-		}
-	}()
+	var buf []byte
 
 	// save a copy of read data
 	b := newBuffer(r)
 	bv := newBufferViewer(b)
 
-	// merge TLS records (fragments)
+	// merge TLS record fragments
 	rr := newRecordReader(bv)
+
+	if buf, err = rr.ReadN(1 + 3 + 2 + 32 + 1); err != nil {
+		return
+	}
 
 	// struct Handshake
 
-	if msgType, err = readUint8(rr); err != nil {
-		return
-	}
-	if msgType != client_hello {
-		goto invalid
-	}
-
-	if msgLen, err = readUint24(rr); err != nil {
-		return
-	}
+	msgLen := uint32(buf[1])<<16 | uint32(buf[2])<<8 | uint32(buf[3])
 	if msgLen > client_hello_max_length {
-		goto invalid
+		err = errInvalidHandshake
+		return
 	}
-	// FIXME: rr.Limit(int(msgLen))
+	if err = rr.Limit(int(msgLen) - 2 - 32 - 1); err != nil {
+		return
+	}
 
 	// struct ClientHello
 
-	// ProtocolVersion, Random
-	if err = rr.Skip(2 + 32); err != nil {
-		return
-	}
-
-	if sessIdLen, err = readUint8(rr); err != nil {
-		return
-	}
-	if sessIdLen > 32 {
-		goto invalid
-	}
+	sessIdLen := buf[38]
 	if sessIdLen > 0 {
 		if err = rr.Skip(int(sessIdLen)); err != nil {
 			return
 		}
 	}
 
-	if cipherSuitesLen, err = readUint16(rr); err != nil {
+	if buf, err = rr.ReadN(2); err != nil {
 		return
 	}
-	if strict {
-		if cipherSuitesLen < 2 || cipherSuitesLen > 65534 {
-			goto invalid
-		}
-	}
+	cipherSuitesLen := uint16(buf[0])<<8 | uint16(buf[1])
 	if err = rr.Skip(int(cipherSuitesLen)); err != nil {
 		return
 	}
 
-	if compMethodsLen, err = readUint8(rr); err != nil {
+	var compMethodsLen uint8
+	if compMethodsLen, err = rr.ReadByte(); err != nil {
 		return
 	}
-	if strict {
-		if compMethodsLen < 1 {
-			goto invalid
-		}
-	}
-	if err = rr.Skip(int(compMethodsLen)); err != nil {
+	if err = rr.Skip(int(compMethodsLen) + 2); err != nil {
 		return
-	}
-
-	if extsLen, err = readUint16(rr); err != nil {
-		return
-	}
-	if strict {
-		_ = extsLen
-		// FIXME: rr.Limit(int(extsLen))
 	}
 
 	// iterate through TLS extensions to find SNI extension
 	// duplicate extensions are not checked here
 	for {
-		if extType, err = readUint16(rr); err != nil {
+		if buf, err = rr.ReadN(2 + 2); err != nil {
 			return
 		}
-		if extLen, err = readUint16(rr); err != nil {
-			return
-		}
+		extType := uint16(buf[0])<<8 | uint16(buf[1])
+		extLen := uint16(buf[2])<<8 | uint16(buf[3])
 
 		if extType == server_name {
-			if strict {
-				// FIXME: rr.Limit(int(extLen))
-			}
 			break
 		}
 		if err = rr.Skip(int(extLen)); err != nil {
@@ -134,35 +77,20 @@ func ReadHostname(r io.Reader) (hostname string, rcvd io.ReadCloser, err error) 
 	}
 
 	// struct ServerNameList
-	if svrNameListLen, err = readUint16(rr); err != nil {
-		return
-	}
-	if strict {
-		_ = svrNameListLen
-		// FIXME: rr.Limit(int(svrNameListLen))
-	}
+	// struct ServerName
 
-	// The definition of SNI-related structures is buggy. There is no way to
-	// skip a ServerName structure whose name_type is not host_name(0).
-	if nameType, err = readUint8(rr); err != nil {
-		return
-	}
-	if hostNameLen, err = readUint16(rr); err != nil {
-		return
-	}
-	if nameType != host_name {
-		err = errUnsupportedNameType
+	if buf, err = rr.ReadN(2 + 1 + 2); err != nil {
 		return
 	}
 
-	if hostName, err = rr.ReadN(int(hostNameLen)); err != nil {
+	// The definition of SNI-related structures is buggy. There is no way
+	// to skip a ServerName structure whose name_type is not host_name(0).
+
+	hostNameLen := uint16(buf[3])<<8 | uint16(buf[4])
+	if buf, err = rr.ReadN(int(hostNameLen)); err != nil {
 		return
 	}
-	hostname = string(hostName)
-	rcvd = b.Close()
-	return
-
-invalid:
-	err = errInvalidHandshake
+	hostname = string(buf)
+	rcvd = b.Hijack() // assume non-nil
 	return
 }

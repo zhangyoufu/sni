@@ -8,60 +8,61 @@ const (
 )
 
 type recordReader struct {
-	src    reader
+	src    reader // also serve as broken flag
 	remain int
+	limit  int
 }
 
 var _ reader = &recordReader{}
 
 func newRecordReader(r reader) *recordReader {
-	return &recordReader{src: r}
+	return &recordReader{src: r, limit: -1}
+}
+
+func (rr *recordReader) broken() bool {
+	return rr.src == nil
+}
+
+func (rr *recordReader) markBroken() {
+	rr.src = nil
+}
+
+func (rr *recordReader) Limit(n int) error {
+	if rr.broken() {
+		return errReaderBroken
+	}
+	if n < 0 || 0 <= rr.limit && rr.limit < n {
+		return errOutOfBoundary
+	}
+	rr.limit = n
+	return nil
 }
 
 func (rr *recordReader) readRecordHeader() (err error) {
-	var (
-		hdr        []byte
-		recordType uint8
-		version    uint16
-		fragLen    uint16
-	)
-
+	var hdr []byte
 	if hdr, err = rr.src.ReadN(5); err != nil {
 		return
 	}
 
-	recordType = hdr[0]
-	if recordType != handshake {
-		goto invalid
-	}
-
-	if strict {
-		version = uint16(hdr[1])<<8 | uint16(hdr[2])
-		// SNI is a TLS extension, SSL is prohibited
-		if version == ssl_v2 || version == ssl_v3 {
-			goto invalid
-		}
-	}
-
-	fragLen = uint16(hdr[3])<<8 | uint16(hdr[4])
+	fragLen := uint16(hdr[3])<<8 | uint16(hdr[4])
 	// zero-length handshake fragments are prohibited (since TLS 1.2)
 	if fragLen == 0 {
-		goto invalid
-	}
-	// fragment length should not exceed 2^14 (since TLS 1.0)
-	if strict && fragLen > 16384 {
-		goto invalid
+		err = errInvalidRecord
+		return
 	}
 
 	rr.remain = int(fragLen)
 	return
-
-invalid:
-	err = errInvalidRecord
-	return
 }
 
-func (rr *recordReader) ReadByte() (data byte, err error) {
+func (rr *recordReader) readByte() (data byte, err error) {
+	if rr.limit == 0 {
+		err = errOutOfBoundary
+		return
+	} else if rr.limit > 0 {
+		rr.limit--
+	}
+
 	if rr.remain <= 0 {
 		if err = rr.readRecordHeader(); err != nil {
 			return
@@ -70,15 +71,35 @@ func (rr *recordReader) ReadByte() (data byte, err error) {
 	return rr.src.ReadByte()
 }
 
-func (rr *recordReader) ReadN(n int) (data []byte, err error) {
+func (rr *recordReader) ReadByte() (data byte, err error) {
+	if rr.broken() {
+		err = errReaderBroken
+		return
+	}
+	data, err = rr.readByte()
+	if err != nil {
+		rr.markBroken()
+		return
+	}
+	return
+}
+
+func (rr *recordReader) readN(n int) (data []byte, err error) {
 	if n < 0 {
 		err = errNegativeRead
 		return
 	}
 
 	if n == 0 {
-		data = []byte{}
 		return
+	}
+
+	if rr.limit >= 0 {
+		if n > rr.limit {
+			err = errOutOfBoundary
+			return
+		}
+		rr.limit -= n
 	}
 
 	if rr.remain <= 0 {
@@ -102,8 +123,8 @@ func (rr *recordReader) ReadN(n int) (data []byte, err error) {
 				return
 			}
 			_ = copy(buf[off:], chunk)
-			off += rr.remain
-			n -= rr.remain
+			off += len(chunk)
+			n -= len(chunk)
 			if err = rr.readRecordHeader(); err != nil {
 				return
 			}
@@ -115,37 +136,72 @@ func (rr *recordReader) ReadN(n int) (data []byte, err error) {
 		if chunk, err = rr.src.ReadN(n); err != nil {
 			return
 		}
-		_ = copy(buf[off:], chunk)
 		rr.remain -= n
+		_ = copy(buf[off:], chunk)
 		data = buf
 	}
 	return
 }
 
-func (rr *recordReader) Skip(n int) (err error) {
-	if n > 0 {
-		if rr.remain <= 0 {
-			if err = rr.readRecordHeader(); err != nil {
-				return
-			}
-		}
+func (rr *recordReader) ReadN(n int) (data []byte, err error) {
+	if rr.broken() {
+		err = errReaderBroken
+		return
+	}
 
-		for n > rr.remain {
-			if err = rr.src.Skip(rr.remain); err != nil {
-				return
-			}
-			n -= rr.remain
-			if err = rr.readRecordHeader(); err != nil {
-				return
-			}
-		}
-
-		if err = rr.src.Skip(n); err != nil {
-			return
-		}
-		rr.remain -= n
-	} else if n < 0 {
-		err = errNegativeRead
+	data, err = rr.readN(n)
+	if err != nil {
+		rr.markBroken()
 	}
 	return
+}
+
+func (rr *recordReader) skip(n int) (err error) {
+	if n < 0 {
+		return errNegativeRead
+	}
+
+	if n == 0 {
+		return
+	}
+
+	if rr.limit >= 0 {
+		if n > rr.limit {
+			return errOutOfBoundary
+		}
+		rr.limit -= n
+	}
+
+	if rr.remain <= 0 {
+		if err = rr.readRecordHeader(); err != nil {
+			return
+		}
+	}
+
+	for n > rr.remain {
+		if err = rr.src.Skip(rr.remain); err != nil {
+			return
+		}
+		n -= rr.remain
+		if err = rr.readRecordHeader(); err != nil {
+			return
+		}
+	}
+
+	if err = rr.src.Skip(n); err != nil {
+		return
+	}
+	rr.remain -= n
+	return
+}
+
+func (rr *recordReader) Skip(n int) error {
+	if rr.broken() {
+		return errReaderBroken
+	}
+	err := rr.skip(n)
+	if err != nil {
+		rr.markBroken()
+	}
+	return err
 }
